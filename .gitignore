@@ -1,0 +1,81 @@
+# ===========================================
+# SUNAT Bot V2 - .gitignore
+# ===========================================
+
+# --- CREDENCIALES Y SENSIBLES ---
+# NUNCA subir archivos con credenciales a repositorios publicos
+.env
+service_account.json
+*.key
+*.pem
+
+# --- DATOS DE COMPROBANTES ---
+# Archivos Excel con datos reales de compras
+*.xlsx
+*.xls
+
+# --- DESCARGAS Y UPLOADS ---
+descargas_sunat/
+uploads/
+
+# --- PYTHON ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- ENTORNOS VIRTUALES ---
+venv/
+env/
+.venv/
+ENV/
+
+# --- BASE DE DATOS ---
+*.db
+*.sqlite3
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# --- SISTEMA OPERATIVO ---
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# --- BACKUPS ---
+*.bak
+*.backup
+*.zip
+
+# --- LOGS ---
+*.log
+logs/
+
+# --- DEPLOYMENT ---
+docker-compose.override.yml
