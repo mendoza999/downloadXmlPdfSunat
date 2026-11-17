@@ -86,3 +86,9 @@ CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 API_TITLE = os.getenv("API_TITLE", "SUNAT Descargas API")
 API_VERSION = os.getenv("API_VERSION", "1.1")
 UVICORN_RELOAD = _booleano("UVICORN_RELOAD", False)
+
+# Prefijo publico cuando la app se publica en un subdirectorio.
+# Ej: ROOT_PATH=/downloadpdf para https://dominio.com/downloadpdf/
+ROOT_PATH = os.getenv("ROOT_PATH", "").strip().rstrip("/")
+if ROOT_PATH and not ROOT_PATH.startswith("/"):
+    ROOT_PATH = "/" + ROOT_PATH

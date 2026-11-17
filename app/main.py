@@ -59,4 +59,7 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8000")),
         reload=config.UVICORN_RELOAD,
+        root_path=config.ROOT_PATH,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )

@@ -323,7 +323,8 @@ async def _leer_parametros_comprobante(request: Request) -> Dict[str, Any]:
     return datos
 
 
-def _url_archivo(cpe, formato: str) -> str:
+def _url_archivo(cpe, formato: str, root_path: str = "") -> str:
+    base = f"{root_path.rstrip('/')}/comprobante/archivo"
     query = urlencode(
         {
             "tipo_doc": cpe.tipo,
@@ -333,7 +334,7 @@ def _url_archivo(cpe, formato: str) -> str:
             "formato": formato,
         }
     )
-    return f"/comprobante/archivo?{query}"
+    return f"{base}?{query}"
 
 
 def _ruta_visible(path: str) -> str:
@@ -363,6 +364,7 @@ def _ruta_visible(path: str) -> str:
     },
 )
 def descargar_comprobante(
+    request: Request,
     datos: Dict[str, Any] = Depends(_leer_parametros_comprobante),
     db: Session = Depends(get_db),
 ):
@@ -430,6 +432,8 @@ def descargar_comprobante(
             )
             raise HTTPException(502, f"No se pudo descargar el comprobante: {exc}")
 
+    root_path = request.scope.get("root_path", "")
+
     archivos = []
     if config.DESCARGAR_PDF and storage.existe_pdf(cpe):
         archivos.append(
@@ -437,7 +441,7 @@ def descargar_comprobante(
                 "tipo": "pdf",
                 "nombre": f"{storage.nombre_base(cpe)}.pdf",
                 "ruta": _ruta_visible(storage.path_pdf(cpe)),
-                "descarga_url": _url_archivo(cpe, "pdf"),
+                "descarga_url": _url_archivo(cpe, "pdf", root_path),
             }
         )
     if config.DESCARGAR_XML and storage.existe_xml(cpe):
@@ -446,7 +450,7 @@ def descargar_comprobante(
                 "tipo": "xml",
                 "nombre": f"{storage.nombre_base(cpe)}.xml",
                 "ruta": _ruta_visible(storage.path_xml(cpe)),
-                "descarga_url": _url_archivo(cpe, "xml"),
+                "descarga_url": _url_archivo(cpe, "xml", root_path),
             }
         )
 
@@ -468,7 +472,7 @@ def descargar_comprobante(
         "completo": not faltantes,
         "archivos": archivos,
         "faltantes": faltantes,
-        "descarga_zip_url": _url_archivo(cpe, "zip"),
+        "descarga_zip_url": _url_archivo(cpe, "zip", root_path),
     }
 
 

@@ -24,5 +24,6 @@ RUN mkdir -p /app/descargas_sunat /app/uploads
 
 EXPOSE 8000
 
-# Cloud Run / Render proveen la variable PORT
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Cloud Run / Render proveen la variable PORT.
+# ROOT_PATH permite publicar la app en un subdirectorio (ej: /downloadpdf).
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --root-path \"${ROOT_PATH:-}\" --proxy-headers --forwarded-allow-ips=\"${FORWARDED_ALLOW_IPS:-*}\""]

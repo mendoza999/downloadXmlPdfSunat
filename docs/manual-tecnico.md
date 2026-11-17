@@ -753,6 +753,35 @@ El Dockerfile esta disenado para ser compatible con Cloud Run y Render:
 
 **NUNCA** subas el archivo `.env` a un repositorio publico. En produccion, configura las variables directamente en la plataforma de despliegue.
 
+### 6.4 Despliegue bajo un subdirectorio (`/downloadpdf`)
+
+La aplicacion soporta publicarse bajo un prefijo, por ejemplo
+`https://servicios.algoritmojuridico.com/downloadpdf`.
+
+1. Defina `ROOT_PATH=/downloadpdf` en el `.env`.
+2. Ejecute el contenedor con `docker compose up -d --build`
+   (`docker-compose.yml` ya incluye volumenes, `shm_size` y el puerto local
+   `127.0.0.1:8010`).
+3. En Nginx, quite el prefijo antes de enviar la peticion:
+
+```nginx
+location /downloadpdf/ {
+    proxy_pass http://127.0.0.1:8010/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 600s;
+}
+```
+
+El servidor arranca con `--root-path "$ROOT_PATH"`, de modo que:
+
+- La documentacion queda en `/downloadpdf/docs`.
+- El esquema OpenAPI usa `/downloadpdf` como `servers`.
+- Las URLs de `descarga_url` / `descarga_zip_url` incluyen el prefijo.
+
+Guia completa: [despliegue-vps-subdirectorio.md](despliegue-vps-subdirectorio.md).
+
 ---
 
 ## 7. Configuracion de Concurrencia

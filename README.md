@@ -238,6 +238,42 @@ services:
 docker-compose up -d
 ```
 
+## Despliegue en VPS bajo un subdirectorio
+
+Para publicar la API en `https://servicios.algoritmojuridico.com/downloadpdf`
+se incluye `docker-compose.yml`, un ejemplo de Nginx en
+`deploy/nginx-downloadpdf.conf` y la guia completa en
+[docs/despliegue-vps-subdirectorio.md](docs/despliegue-vps-subdirectorio.md).
+
+Resumen:
+
+```bash
+cp .env.example .env
+# En .env:
+#   ROOT_PATH=/downloadpdf
+#   CORS_ORIGINS=https://servicios.algoritmojuridico.com
+
+mkdir -p data descargas_sunat uploads
+docker compose up -d --build
+```
+
+Nginx publica el contenedor (escucha solo en `127.0.0.1:8010`):
+
+```nginx
+location = /downloadpdf { return 301 /downloadpdf/; }
+
+location /downloadpdf/ {
+    proxy_pass http://127.0.0.1:8010/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 600s;
+}
+```
+
+La app, su documentacion (`/downloadpdf/docs`) y los enlaces de descarga
+respetan automaticamente el prefijo configurado en `ROOT_PATH`.
+
 ## Estructura del Proyecto
 
 ```
@@ -263,7 +299,11 @@ docker-compose up -d
 │       └── notifications.py # Correo electronico
 ├── docs/
 │   ├── manual-usuario.md    # Manual de usuario
-│   └── manual-tecnico.md    # Manual tecnico
+│   ├── manual-tecnico.md    # Manual tecnico
+│   └── despliegue-vps-subdirectorio.md # Guia de despliegue
+├── deploy/
+│   └── nginx-downloadpdf.conf # Ejemplo de Nginx para /downloadpdf
+├── docker-compose.yml       # Despliegue con Docker
 ├── Dockerfile
 ├── requirements.txt
 └── .env.example
