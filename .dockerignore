@@ -35,6 +35,10 @@ MANIFEST
 *.db
 *.sqlite3
 
+# Datos de comprobantes (evitar incluir Excel reales en la imagen)
+*.xlsx
+*.xls
+
 # Descargas temporales
 descargas_sunat/
 uploads/

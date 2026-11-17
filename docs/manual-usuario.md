@@ -29,16 +29,16 @@ Necesitas tener acceso al portal SOL de la SUNAT con las siguientes credenciales
 
 ### 2.2 Archivo Excel
 
-El archivo Excel debe contener los comprobantes a descargar con las siguientes columnas:
+El archivo Excel debe contener los comprobantes a descargar. El bot detecta las columnas por el nombre del encabezado, por lo que el orden puede variar:
 
-| Columna | Contenido | Ejemplo |
-|---------|-----------|---------|
-| G | Tipo de documento | `1` (Factura) o codigo numerico |
-| H | Serie | `F001`, `B001` |
-| J | Numero de comprobante | `12345` |
-| M | RUC del emisor | `12345678901` |
+| Encabezado | Contenido | Ejemplo |
+|------------|-----------|---------|
+| Tipo / Tipo de documento | `1` (Factura), `3` (Boleta) o el codigo SUNAT | `1` |
+| Serie | Serie del comprobante | `F001`, `B001` |
+| Numero / Nro Comprobante | Numero del comprobante | `12345` |
+| RUC Emisor / RUC del emisor | RUC del emisor (11 digitos) | `12345678901` |
 
-> **Nota:** El archivo debe tener encabezados en la primera fila. El bot lee especificamente las columnas G, H, J y M.
+> **Nota:** El archivo debe tener una fila de encabezados (puede no ser la primera fila). Si el archivo no tiene encabezados reconocibles, se asume la estructura clasica: columnas G (tipo), H (serie), I (numero) y J (RUC emisor).
 
 ### 2.3 Cuenta de Gmail (Opcional)
 
@@ -356,8 +356,10 @@ Una vez configurado, los archivos se subiran automaticamente a Google Drive desp
 | Error | Causa | Solucion |
 |-------|-------|----------|
 | `No se pudo obtener el token` | Credenciales SUNAT incorrectas o portal caido | Verifica tus credenciales en `.env` y que el portal SOL este operativo |
+| `SUNAT solicita un CAPTCHA` | Demasiados intentos de login fallidos | Ingresa manualmente al portal SOL una vez para reiniciar el contador y vuelve a ejecutar la descarga |
 | `Token expirado` | El token de SUNAT expiro durante la descarga | El bot intenta regenerarlo automaticamente. Si persiste, ejecuta manualmente |
 | `El archivo debe ser un Excel` | Se subio un archivo que no es `.xlsx` o `.xls` | Asegurate de subir un archivo Excel valido |
+| `No se encontraron comprobantes validos` | El Excel no tiene encabezados reconocibles o los RUC no tienen 11 digitos | Revisa la tabla de la seccion 2.2 y el detalle del error |
 | `Job no encontrado` | El ID del trabajo no existe en la base de datos | Verifica que el ID sea correcto |
 | `Error de red` | Problemas de conexion con la API de SUNAT | Verifica tu conexion a internet |
 | `No se pudo subir a Drive` | Credenciales de Google incorrectas o API no habilitada | Revisa la configuracion de Google Drive |

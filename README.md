@@ -1,5 +1,7 @@
 # SUNAT Bot V2
 
+Aplicación para descargar XML y PDF desde el portal de SUNAT Perú.
+
 Bot automatizado para la descarga de comprobantes de pago (facturas y boletas) desde el portal de la SUNAT (Superintendencia Nacional de Aduanas y de Administracion Tributaria del Peru).
 
 ## Caracteristicas
@@ -102,9 +104,87 @@ El servidor estara disponible en: `http://localhost:8000`
 
 ### Subir un Excel y descargar comprobantes
 
+El Excel debe tener una fila de encabezados con las columnas **Tipo**, **Serie**,
+**Numero** y **RUC Emisor** (el orden no importa). Si no se detectan los
+encabezados, se asumen las columnas G, H, I y J.
+
 ```bash
 curl -X POST "http://localhost:8000/descargar" \
   -F "file=@comprobantes.xlsx"
+```
+
+### Descargar un comprobante puntual (PDF y XML)
+
+Ademas de la carga masiva por Excel, se puede solicitar la descarga de un solo
+comprobante. La API obtiene el token de SUNAT, descarga los archivos habilitados
+(`DESCARGAR_PDF` / `DESCARGAR_XML`), los guarda en disco y los sube a Google
+Drive si el usuario lo tiene vinculado.
+
+```bash
+curl -X POST "http://localhost:8000/descargar/comprobante" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "tipo_doc": "01",
+        "serie": "F001",
+        "numero": "123",
+        "ruc_emisor": "20123456789"
+      }'
+```
+
+`tipo_doc` acepta el codigo SUNAT (`01` factura, `03` boleta, `07` nota de
+credito, `08` nota de debito, `09` guia de remision) o su nombre (`factura`,
+`boleta`, etc.). Los campos numericos (`numero`, `ruc_emisor`) pueden enviarse
+como texto o como numero.
+
+Tambien se aceptan los mismos campos como formulario
+(`application/x-www-form-urlencoded` / `multipart/form-data`) o como query
+string:
+
+```bash
+curl -X POST "http://localhost:8000/descargar/comprobante?tipo_doc=01&serie=F001&numero=123&ruc_emisor=20123456789"
+```
+
+**Response:**
+```json
+{
+  "comprobante": {
+    "tipo_doc": "01",
+    "serie": "F001",
+    "numero": "123",
+    "ruc_emisor": "20123456789"
+  },
+  "completo": true,
+  "archivos": [
+    {
+      "tipo": "pdf",
+      "nombre": "20123456789_F001_123.pdf",
+      "ruta": "descargas_sunat/pdfs/20123456789_F001_123.pdf",
+      "descarga_url": "/comprobante/archivo?tipo_doc=01&serie=F001&numero=123&ruc_emisor=20123456789&formato=pdf"
+    },
+    {
+      "tipo": "xml",
+      "nombre": "20123456789_F001_123.xml",
+      "ruta": "descargas_sunat/xmls/20123456789_F001_123.xml",
+      "descarga_url": "/comprobante/archivo?tipo_doc=01&serie=F001&numero=123&ruc_emisor=20123456789&formato=xml"
+    }
+  ],
+  "faltantes": [],
+  "descarga_zip_url": "/comprobante/archivo?tipo_doc=01&serie=F001&numero=123&ruc_emisor=20123456789&formato=zip"
+}
+```
+
+Si uno de los dos archivos no pudo descargarse, la respuesta es `200` con
+`"completo": false` y el detalle en `faltantes`. Si ninguno se pudo obtener, la
+API responde `404`; los errores de credenciales o de conexion responden `502`/`503`.
+
+### Descargar un archivo ya obtenido
+
+```bash
+# PDF
+curl -OJ "http://localhost:8000/comprobante/archivo?tipo_doc=01&serie=F001&numero=123&ruc_emisor=20123456789&formato=pdf"
+
+# ZIP con PDF + XML
+curl -OJ "http://localhost:8000/comprobante/archivo?tipo_doc=01&serie=F001&numero=123&ruc_emisor=20123456789&formato=zip"
 ```
 
 ### Consultar estado de un trabajo
@@ -193,8 +273,13 @@ docker-compose up -d
 
 | Metodo | Ruta | Descripcion |
 |--------|------|-------------|
+| GET | `/` | Informacion basica del servicio |
+| GET | `/health` | Health check |
 | POST | `/descargar` | Sube un Excel e inicia la descarga |
+| POST | `/descargar/comprobante` | Descarga puntual (sincrona) de PDF/XML de un comprobante |
+| GET | `/comprobante/archivo` | Entrega un PDF, XML o ZIP ya descargado |
 | GET | `/estado/{job_id}` | Consulta el estado de un trabajo |
+| GET | `/jobs` | Lista los ultimos trabajos |
 | GET | `/auth/google` | Inicia autenticacion OAuth con Google |
 | GET | `/auth/google/callback` | Callback de autenticacion OAuth |
 

@@ -222,6 +222,8 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 | Metodo | Ruta | Descripcion |
 |--------|------|-------------|
 | `POST` | `/descargar` | Sube un Excel e inicia la descarga |
+| `POST` | `/descargar/comprobante` | Descarga puntual (sincrona) de PDF/XML de un comprobante |
+| `GET` | `/comprobante/archivo` | Entrega un PDF, XML o ZIP ya descargado |
 | `GET` | `/estado/{job_id}` | Consulta el estado de un trabajo |
 | `GET` | `/auth/google` | Inicia el flujo de autenticacion OAuth con Google |
 | `GET` | `/auth/google/callback` | Callback de autenticacion OAuth |
@@ -249,6 +251,67 @@ file: Compras Abril 2026.xlsx
 2. Guarda el archivo en `uploads/`
 3. Crea un registro de `Job` en la BD con estado `pending`
 4. Ejecuta el pipeline en segundo plano con `BackgroundTasks`
+
+#### `POST /descargar/comprobante`
+
+Descarga **sincrona** de un solo comprobante. No usa `BackgroundTasks` ni crea
+un `Job`: recibe los datos, obtiene el token SUNAT y descarga los archivos
+habilitados (`DESCARGAR_PDF` / `DESCARGAR_XML`).
+
+**Request:**
+```http
+POST /descargar/comprobante
+Content-Type: application/json
+
+{
+  "tipo_doc": "01",
+  "serie": "F001",
+  "numero": "123",
+  "ruc_emisor": "20123456789"
+}
+```
+
+**Response:**
+```json
+{
+  "comprobante": {
+    "tipo_doc": "01",
+    "serie": "F001",
+    "numero": "123",
+    "ruc_emisor": "20123456789"
+  },
+  "completo": true,
+  "archivos": [
+    {
+      "tipo": "pdf",
+      "nombre": "20123456789_F001_123.pdf",
+      "ruta": "descargas_sunat/pdfs/20123456789_F001_123.pdf",
+      "descarga_url": "/comprobante/archivo?...&formato=pdf"
+    }
+  ],
+  "faltantes": [],
+  "descarga_zip_url": "/comprobante/archivo?...&formato=zip"
+}
+```
+
+**Proceso:**
+1. Normaliza y valida `tipo_doc`, `serie`, `numero` y `ruc_emisor`
+   (reutiliza `crear_comprobante` de `app/models/comprobante.py`).
+   Los parametros se leen desde JSON, formulario o query string, y los campos
+   numericos aceptan texto o numero.
+2. Si los archivos ya existen en `OUTPUT_DIR`, los reutiliza sin consultar SUNAT.
+3. En caso contrario obtiene el token y ejecuta `DocumentPipeline.descargar_lista`
+   (una sola pasada, con los reintentos inmediatos configurados).
+4. Guarda en disco y sube a Google Drive si el usuario tiene OAuth vinculado.
+
+**Errores:** `400` datos invalidos, `404` no se obtuvo ningun archivo,
+`502` error de descarga/conexion, `503` credenciales SUNAT no configuradas.
+
+#### `GET /comprobante/archivo`
+
+Entrega un archivo previamente descargado. Parametros: `tipo_doc`, `serie`,
+`numero`, `ruc_emisor` y `formato` (`pdf`, `xml` o `zip`; por defecto `pdf`).
+Responde `404` si el archivo aun no fue descargado.
 
 #### `GET /estado/{job_id}`
 
@@ -298,9 +361,10 @@ def leer_excel(excel_path: str) -> List[Comprobante]
 ```
 
 - Lee el Excel usando Pandas
-- Extrae columnas G, H, J, M
-- Convierte el tipo de documento (1 -> "01", otros -> zfill(2))
-- Devuelve una lista de objetos `Comprobante`
+- Detecta la fila de encabezados y ubica las columnas por nombre (`Tipo`, `Serie`, `Numero`, `RUC Emisor` y sus variantes); si no las encuentra, usa las columnas G, H, I y J
+- Convierte el tipo de documento (1 -> "01", 3 -> "03", etc.)
+- Omite filas vacias o invalidas (por ejemplo, RUC que no tenga 11 digitos) y reporta un resumen en el log
+- Devuelve una lista de objetos `Comprobante` (sin duplicados)
 
 ---
 
