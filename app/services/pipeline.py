@@ -9,9 +9,12 @@ from app.core import config
 from app.models.comprobante import Comprobante, leer_excel
 from app.services.notifications import enviar_correo
 from app.services.storage import LocalStorage
-from app.services.sunat_api import SunatAPIClient
+from app.services.sunat_api import SunatAPIClient, SunatErrorPermanente
 
 logger = logging.getLogger(__name__)
+
+# Centinela: SUNAT indicó que el comprobante no existe / no corresponde.
+_NO_ENCONTRADO = object()
 
 
 class DocumentPipeline:
@@ -26,13 +29,16 @@ class DocumentPipeline:
         sunat_credentials: Optional[Tuple[str, str, str]] = None,
     ):
         self.excel_path = excel_path
-        self.client = SunatAPIClient(token)
+        self.sunat_credentials = sunat_credentials
+        ruc_logueado = sunat_credentials[0] if sunat_credentials else None
+        self.client = SunatAPIClient(token, ruc_logueado=ruc_logueado)
         self.storage = storage
         self.drive = drive
         self.descargar_pdf = descargar_pdf
         self.descargar_xml = descargar_xml
-        self.sunat_credentials = sunat_credentials
         self._token_lock = threading.Lock()
+        if self.client.ruc_logueado:
+            logger.info("RUC autenticado en SUNAT: %s", self.client.ruc_logueado)
 
     # ── utilidades internas ────────────────────────────────────────────
     def _falta_algo(self, cpe: Comprobante) -> Set[str]:
@@ -74,6 +80,17 @@ class DocumentPipeline:
                     data = self.client.fetch_xml(cpe.ruc, cpe.tipo, cpe.serie, cpe.numero)
             except PermissionError:
                 raise
+            except SunatErrorPermanente as e:
+                cpe._motivo = str(e)  # type: ignore[attr-defined]
+                logger.warning(
+                    "[%s] %s-%s (RUC %s): %s",
+                    etiqueta,
+                    cpe.serie,
+                    cpe.numero,
+                    cpe.ruc,
+                    e,
+                )
+                return _NO_ENCONTRADO
             except Exception as e:
                 logger.error("[%s] %s-%s: excepción %s", etiqueta, cpe.serie, cpe.numero, e)
                 data = None
@@ -103,24 +120,39 @@ class DocumentPipeline:
         if not falta:
             return None
 
+        permanentes = set()
         for archivo in sorted(falta):
             time.sleep(
                 random.uniform(config.PAUSA_MIN_ENTRE_ARCHIVOS, config.PAUSA_MAX_ENTRE_ARCHIVOS)
             )
             data = self._descargar_archivo_con_reintento(cpe, archivo, archivo.upper())
-            if data:
+            if data is _NO_ENCONTRADO:
+                permanentes.add(archivo)
+            elif data:
                 self._guardar_y_subir(cpe, archivo, data)
                 falta.discard(archivo)
 
         if falta:
             cpe._falta = falta  # type: ignore[attr-defined]
-            logger.warning(
-                "Pendiente %s-%s (RUC %s): falta %s",
-                cpe.serie,
-                cpe.numero,
-                cpe.ruc,
-                ", ".join(sorted(falta)),
-            )
+            if falta <= permanentes:
+                # SUNAT no tiene el comprobante para este RUC: no tiene sentido
+                # seguir reintentando en las siguiente rondas.
+                cpe._permanente = True  # type: ignore[attr-defined]
+                logger.error(
+                    "No encontrado en SUNAT %s-%s (RUC %s): falta %s. No se reintentará.",
+                    cpe.serie,
+                    cpe.numero,
+                    cpe.ruc,
+                    ", ".join(sorted(falta)),
+                )
+            else:
+                logger.warning(
+                    "Pendiente %s-%s (RUC %s): falta %s",
+                    cpe.serie,
+                    cpe.numero,
+                    cpe.ruc,
+                    ", ".join(sorted(falta)),
+                )
             return cpe
         return None
 
@@ -142,6 +174,7 @@ class DocumentPipeline:
                     "serie": c.serie,
                     "numero": c.numero,
                     "falta": sorted(self._falta_algo(c)),
+                    "motivo": getattr(c, "_motivo", None),
                 }
                 for c in faltantes
             ],
@@ -187,7 +220,12 @@ class DocumentPipeline:
 
         return self._resumen(comprobantes, 1 if pendientes else 0)
 
-    def run(self) -> Dict:
+    def run(self, comprobantes: Optional[List[Comprobante]] = None) -> Dict:
+        """Ejecuta el pipeline completo (rondas + notificacion).
+
+        Si se entrega ``comprobantes`` se procesa esa lista (solicitud JSON);
+        en caso contrario se leen los comprobantes del Excel configurado.
+        """
         modos = []
         if self.descargar_pdf:
             modos.append("PDF")
@@ -198,9 +236,14 @@ class DocumentPipeline:
                 "No hay nada que descargar: DESCARGAR_PDF y DESCARGAR_XML están desactivados."
             )
 
-        logger.info("Modo de descarga: %s | Excel: %s", " + ".join(modos), self.excel_path)
+        if comprobantes is None:
+            origen = f"Excel: {self.excel_path}"
+            todos = leer_excel(self.excel_path)
+        else:
+            origen = f"Solicitud JSON: {len(comprobantes)} comprobante(s)"
+            todos = list(comprobantes)
+        logger.info("Modo de descarga: %s | %s", " + ".join(modos), origen)
 
-        todos = leer_excel(self.excel_path)
         pendientes = [c for c in todos if not self._comprobante_completo(c)]
         logger.info(
             "Total: %s | Ya completos: %s | Pendientes: %s",
@@ -257,7 +300,7 @@ class DocumentPipeline:
                             )
                             res = cpe
 
-                        if res:
+                        if res and not getattr(res, "_permanente", False):
                             nuevos_pendientes.append(res)
 
                 pendientes = [c for c in nuevos_pendientes if self._falta_algo(c)]

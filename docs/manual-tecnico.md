@@ -26,15 +26,15 @@ El sistema esta construido como un servicio web usando **FastAPI** y ejecuta tar
 ### Flujo de Datos
 
 ```
-[Usuario sube Excel]
-        │
-        ▼
-  FastAPI (/descargar) ──> Job en BD (pending)
+[Usuario sube Excel]                    [Usuario envia JSON /descargar/lote]
+        │                                        │
+        ▼                                        ▼
+  FastAPI (/descargar) ──> Job en BD (pending) <── FastAPI (/descargar/lote)
         │
         ▼  (BackgroundTasks)
   DocumentPipeline.run()
         │
-        ├── leer_excel() ──> Lista de Comprobantes
+        ├── leer_excel() o lista JSON ──> Lista de Comprobantes
         │
         ├── Para cada comprobante (paralelo):
         │       │
@@ -222,6 +222,7 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 | Metodo | Ruta | Descripcion |
 |--------|------|-------------|
 | `POST` | `/descargar` | Sube un Excel e inicia la descarga |
+| `POST` | `/descargar/lote` | Recibe un array JSON y encola la descarga de varios comprobantes |
 | `POST` | `/descargar/comprobante` | Descarga puntual (sincrona) de PDF/XML de un comprobante |
 | `GET` | `/comprobante/archivo` | Entrega un PDF, XML o ZIP ya descargado |
 | `GET` | `/estado/{job_id}` | Consulta el estado de un trabajo |
@@ -251,6 +252,57 @@ file: Compras Abril 2026.xlsx
 2. Guarda el archivo en `uploads/`
 3. Crea un registro de `Job` en la BD con estado `pending`
 4. Ejecuta el pipeline en segundo plano con `BackgroundTasks`
+
+#### `POST /descargar/lote`
+
+Descarga **asincrona** de varios comprobantes recibidos como un array JSON. No
+usa Excel: crea un `Job` y ejecuta `DocumentPipeline.run(comprobantes=[...])` en
+segundo plano, reutilizando rondas, reintentos, almacenamiento local y Drive.
+
+**Request:**
+```http
+POST /descargar/lote
+Content-Type: application/json
+
+[
+  {"tipo_doc": "01", "serie": "F001", "numero": "123", "ruc_emisor": "20123456789"},
+  {"tipo_doc": "03", "serie": "B001", "numero": "45",  "ruc_emisor": "20123456789"}
+]
+```
+
+**Response:**
+```json
+{
+  "job_id": "uuid-del-trabajo",
+  "status": "pending",
+  "total": 2,
+  "duplicados_omitidos": 0
+}
+```
+
+**Proceso:**
+1. Valida que el array no este vacio y no supere `MAX_COMPROBANTES_POR_LOTE`.
+2. Normaliza cada elemento con `crear_comprobante`; si alguno es invalido
+   responde `400` con el indice y el detalle.
+3. Omite duplicados exactos `(RUC, tipo, serie, numero)` y los cuenta en
+   `duplicados_omitidos`.
+4. Crea el `Job` y encola `ejecutar_pipeline_lote` con `BackgroundTasks`.
+5. El resumen final se consulta en `GET /estado/{job_id}`.
+
+**Errores:** `400` array vacio o datos invalidos, `422` lote demasiado grande o
+campos faltantes.
+
+**Nota:** SUNAT puede responder `HTTP 500` de forma intermitente al pedir PDF/XML.
+El pipeline reintenta por archivo y por rondas, por lo que el job puede quedar en
+`processing` varios minutos. Si no se obtiene ningun archivo, el job termina en
+`failed`; si se obtiene al menos uno, queda en `completed` y los pendientes se
+detallan en `details.faltantes`.
+
+**Comprobante no encontrado:** si SUNAT responde `HTTP 422` con
+`codError 113` ("No hay resultados para la consulta"), el comprobante no existe
+o no pertenece al RUC autenticado en el `.env` (ni como emisor ni como
+receptor). En ese caso el pipeline lo marca como no encontrado y no lo reintenta;
+el motivo queda en `details.faltantes`.
 
 #### `POST /descargar/comprobante`
 
@@ -379,11 +431,16 @@ def leer_excel(excel_path: str) -> List[Comprobante]
 | `id` | String (PK) | Identificador unico del usuario |
 | `email` | String (unique) | Correo electronico |
 | `google_refresh_token` | String (nullable) | Token de Google Drive |
-| `sunat_ruc` | String (nullable) | RUC de SUNAT |
-| `sunat_usuario` | String (nullable) | Usuario de SUNAT |
-| `sunat_clave` | String (nullable) | Clave de SUNAT |
+| `sunat_ruc` | String (nullable) | RUC de SUNAT (respaldo; el `.env` tiene prioridad) |
+| `sunat_usuario` | String (nullable) | Usuario de SUNAT (respaldo; el `.env` tiene prioridad) |
+| `sunat_clave` | String (nullable) | Clave de SUNAT (respaldo; el `.env` tiene prioridad) |
 | `created_at` | DateTime | Fecha de creacion |
 | `updated_at` | DateTime | Fecha de actualizacion |
+
+> Las credenciales SUNAT se leen primero del `.env` (`SUNAT_RUC`,
+> `SUNAT_USUARIO`, `SUNAT_CLAVE`). Los campos de la tabla `users` solo se usan
+> si la variable correspondiente del `.env` esta vacia. Si ambos difieren se
+> registra una advertencia en el log.
 
 #### Modelo `Job`
 
@@ -422,7 +479,11 @@ def obtener_token_automatico(ruc: str, usuario: str, clave: str) -> str
 3. **Navegar a SUNAT:** Accede a `https://www.sunat.gob.pe/sol.html`
 4. **Hacer click en "Consulta de documentos":** Abre el formulario de login
 5. **Completar formulario:** Llena RUC, usuario y clave
-6. **Cerrar modales:** Maneja modales informativos que aparecen despues del login
+6. **Cerrar modales:** Maneja los modales informativos que aparecen despues del login.
+   Algunas cuentas muestran la campana de actualizacion de datos
+   (`#divModalCampana`, iframe `#ifrVCE`), que intercepta los clics del menu.
+   Se cierra con `#btnCerrar` ("Continuar sin confirmar"); si el boton no
+   responde, se oculta el modal por JS como ultimo recurso.
 7. **Obtener token:**
    - Primero intenta interceptarlo de las requests HTTP
    - Si no, navega a la seccion de facturas para forzar una request con token
@@ -459,15 +520,25 @@ class SunatAPIClient:
 
 **Proceso de descarga:**
 
-1. Construye la URL: `{BASE_URL}/{ruc}-{tipo}-{serie}-{numero}-2/{sufijo}`
+1. Construye la URL: `{BASE_URL}/{ruc}-{tipo}-{serie}-{numero}-{modo}/{sufijo}`
+   - Modo `1` si el RUC emisor es el mismo RUC autenticado (comprobante emitido)
+   - Modo `2` si el RUC emisor es distinto (comprobante recibido)
+   - Si no se puede leer el RUC del token, prueba ambos modos
    - Sufijo `01` para PDF
    - Sufijo `02` para XML
 2. Realiza la request GET con headers de autorizacion
 3. Si recibe 401, lanza `PermissionError` (token expirado)
-4. Decodifica la respuesta JSON y extrae `valArchivo` (base64)
-5. Decodifica el base64 a bytes
-6. Descomprime el ZIP y extrae el archivo (PDF o XML)
-7. Retorna el contenido del archivo
+4. Si recibe 422, interpreta `errors[].codError`:
+   - `105`: el comprobante debe consultarse en el otro modo (`-1`); reintenta
+   - `113`: "No hay resultados para la consulta"; lanza
+     `ComprobanteNoEncontrado` (error permanente, no se reintenta)
+   - otro codigo: lanza `SolicitudRechazada` con el detalle de SUNAT
+5. Si recibe 5xx, retorna `None` para que el pipeline reintente (SUNAT
+   responde 500 de forma intermitente)
+6. Decodifica la respuesta JSON y extrae `valArchivo` (base64)
+7. Decodifica el base64 a bytes
+8. Descomprime el ZIP y extrae el archivo (PDF o XML)
+9. Retorna el contenido del archivo
 
 **Headers configurados:**
 ```
@@ -482,7 +553,7 @@ Referer: https://e-factura.sunat.gob.pe/
 
 ### 4.10 `app/services/pipeline.py` - Orquestador Principal
 
-**Funcion:** Coordina todo el proceso de descarga: lee el Excel, procesa comprobantes en paralelo, gestiona reintentos y envia notificaciones.
+**Funcion:** Coordina todo el proceso de descarga: obtiene la lista de comprobantes (desde Excel o desde una solicitud JSON), procesa comprobantes en paralelo, gestiona reintentos y envia notificaciones.
 
 #### Clase `DocumentPipeline`
 
@@ -492,10 +563,12 @@ class DocumentPipeline:
                  descargar_pdf=True, descargar_xml=True):
 ```
 
-**Metodo `run()`:**
+**Metodo `run(comprobantes=None)`:**
 
 ```
-1. Leer Excel ──> Lista de Comprobantes
+1. Origen de los datos:
+   - comprobantes=None ──> leer_excel()
+   - comprobantes=[...] ──> lista ya validada (solicitud JSON)
 2. Filtrar los que ya estan completos
 3. Si no hay pendientes, terminar
 4. Mientras haya pendientes y no se alcancen las rondas maximas:

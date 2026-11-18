@@ -6,13 +6,14 @@ import shutil
 import tempfile
 import uuid
 import zipfile
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlencode
 
 import google_auth_oauthlib.flow
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Body,
     Depends,
     File,
     HTTPException,
@@ -112,18 +113,53 @@ def _obtener_usuario_default(db: Session) -> User:
 
 
 def _credenciales_sunat(user: User) -> Tuple[str, str, str]:
-    ruc = user.sunat_ruc or config.SUNAT_RUC
-    usuario = user.sunat_usuario or config.SUNAT_USUARIO
-    clave = user.sunat_clave or config.SUNAT_CLAVE
+    """Devuelve las credenciales SUNAT.
+
+    El archivo ``.env`` es la fuente de verdad; los valores guardados en la
+    tabla ``users`` solo se usan como respaldo si el ``.env`` está incompleto.
+    """
+    ruc = config.SUNAT_RUC or user.sunat_ruc
+    usuario = config.SUNAT_USUARIO or user.sunat_usuario
+    clave = config.SUNAT_CLAVE or user.sunat_clave
     if not all((ruc, usuario, clave)):
         raise RuntimeError(
             "Faltan credenciales SUNAT. Configúrelas en el archivo .env"
         )
+    if user.sunat_ruc and config.SUNAT_RUC and user.sunat_ruc != config.SUNAT_RUC:
+        logger.warning(
+            "El usuario %s tiene un RUC SUNAT distinto (%s) al del .env (%s); "
+            "se usará el del .env.",
+            user.id,
+            user.sunat_ruc,
+            config.SUNAT_RUC,
+        )
     return ruc, usuario, clave
 
 
-def ejecutar_pipeline(job_id: str, excel_path: str):
-    """Ejecuta el pipeline de descarga y actualiza el estado del job."""
+class DescargaComprobanteRequest(BaseModel):
+    tipo_doc: Union[str, int] = Field(
+        ..., description="Tipo de documento SUNAT (01, 03, 07, 08, 09)"
+    )
+    serie: Union[str, int] = Field(
+        ..., description="Serie del comprobante, por ejemplo F001"
+    )
+    numero: Union[str, int] = Field(..., description="Numero correlativo del comprobante")
+    ruc_emisor: Union[str, int] = Field(..., description="RUC del emisor (11 digitos)")
+
+
+CAMPOS_COMPROBANTE = ("tipo_doc", "serie", "numero", "ruc_emisor")
+
+
+def _ejecutar_job(
+    job_id: str,
+    excel_path: Optional[str] = None,
+    comprobantes: Optional[List] = None,
+):
+    """Ejecuta la descarga de un job y actualiza su estado en la base de datos.
+
+    El origen puede ser un Excel (``excel_path``) o una lista de comprobantes
+    ya validados (``comprobantes``, solicitud JSON).
+    """
     db = SessionLocal()
     job: Optional[Job] = None
     try:
@@ -154,18 +190,27 @@ def ejecutar_pipeline(job_id: str, excel_path: str):
             descargar_xml=config.DESCARGAR_XML,
             sunat_credentials=(sunat_ruc, sunat_usuario, sunat_clave),
         )
-        resumen = pipeline.run()
+        resumen = pipeline.run(comprobantes=comprobantes)
 
         faltantes = resumen.get("faltantes", [])
-        job.status = "completed"
+        total = resumen.get("total", 0)
+        completos = resumen.get("completos", 0)
         job.details = resumen
-        if faltantes:
+        if faltantes and completos == 0:
+            job.status = "failed"
             job.message = (
-                f"Descarga finalizada con {len(faltantes)} comprobante(s) pendiente(s) "
-                f"de {resumen.get('total', 0)}."
+                f"No se pudo descargar ningún comprobante de {total}. "
+                f"Pendientes: {len(faltantes)}. Revise details.faltantes."
             )
         else:
-            job.message = "Descarga completada exitosamente."
+            job.status = "completed"
+            if faltantes:
+                job.message = (
+                    f"Descarga finalizada con {len(faltantes)} comprobante(s) pendiente(s) "
+                    f"de {total}."
+                )
+            else:
+                job.message = "Descarga completada exitosamente."
         db.commit()
 
     except Exception as e:
@@ -182,11 +227,22 @@ def ejecutar_pipeline(job_id: str, excel_path: str):
         )
     finally:
         db.close()
-        # El Excel subido ya no se necesita después del procesamiento
-        try:
-            os.remove(excel_path)
-        except OSError:
-            pass
+        if excel_path:
+            # El Excel subido ya no se necesita después del procesamiento
+            try:
+                os.remove(excel_path)
+            except OSError:
+                pass
+
+
+def ejecutar_pipeline(job_id: str, excel_path: str):
+    """Tarea en segundo plano para descargas originadas en un Excel."""
+    _ejecutar_job(job_id, excel_path=excel_path)
+
+
+def ejecutar_pipeline_lote(job_id: str, comprobantes: List):
+    """Tarea en segundo plano para descargas originadas en una solicitud JSON."""
+    _ejecutar_job(job_id, comprobantes=comprobantes)
 
 
 # ─── Endpoints ──────────────────────────────────────────────────────────
@@ -236,6 +292,91 @@ async def iniciar_descarga(
     return JSONResponse(content={"job_id": job_id, "status": "pending"})
 
 
+@router.post("/descargar/lote", tags=["descargas"])
+def iniciar_descarga_lote(
+    background_tasks: BackgroundTasks,
+    comprobantes: List[DescargaComprobanteRequest] = Body(
+        ...,
+        description=(
+            "Array de comprobantes a descargar. Cada elemento debe incluir "
+            "tipo_doc, serie, numero y ruc_emisor."
+        ),
+    ),
+    db: Session = Depends(get_db),
+):
+    """Encola la descarga de varios comprobantes enviados como JSON.
+
+    A diferencia de ``POST /descargar`` (que lee un Excel), este endpoint
+    recibe directamente un array de comprobantes. Devuelve un ``job_id`` que
+    se consulta con ``GET /estado/{job_id}``.
+    """
+    if not comprobantes:
+        raise HTTPException(400, "Debe enviar al menos un comprobante en el array.")
+
+    if len(comprobantes) > config.MAX_COMPROBANTES_POR_LOTE:
+        raise HTTPException(
+            422,
+            f"El lote supera el máximo de {config.MAX_COMPROBANTES_POR_LOTE} "
+            "comprobantes por solicitud.",
+        )
+
+    cpes = []
+    errores = []
+    duplicados = 0
+    vistos = set()
+
+    for indice, item in enumerate(comprobantes, start=1):
+        try:
+            cpe = crear_comprobante(
+                item.tipo_doc,
+                item.serie,
+                item.numero,
+                item.ruc_emisor,
+                fila=indice,
+            )
+        except ValueError as exc:
+            errores.append(f"item {indice}: {exc}")
+            continue
+
+        clave = (cpe.ruc, cpe.tipo, cpe.serie, cpe.numero)
+        if clave in vistos:
+            duplicados += 1
+            continue
+        vistos.add(clave)
+        cpes.append(cpe)
+
+    if errores:
+        detalle = "; ".join(errores[:10])
+        if len(errores) > 10:
+            detalle += f"; ... ({len(errores)} errores en total)"
+        raise HTTPException(400, f"Solicitud inválida: {detalle}")
+
+    user = _obtener_usuario_default(db)
+    job_id = str(uuid.uuid4())
+
+    new_job = Job(
+        id=job_id,
+        user_id=user.id,
+        status="pending",
+        excel_filename=None,
+        excel_path=None,
+        message="Tarea encolada.",
+        details={"origen": "json", "solicitados": len(cpes)},
+    )
+    db.add(new_job)
+    db.commit()
+
+    background_tasks.add_task(ejecutar_pipeline_lote, job_id, cpes)
+    return JSONResponse(
+        content={
+            "job_id": job_id,
+            "status": "pending",
+            "total": len(cpes),
+            "duplicados_omitidos": duplicados,
+        }
+    )
+
+
 @router.get("/estado/{job_id}", tags=["descargas"])
 async def obtener_estado(job_id: str, db: Session = Depends(get_db)):
     job = db.query(Job).filter(Job.id == job_id).first()
@@ -264,20 +405,6 @@ async def listar_jobs(limit: int = 20, db: Session = Depends(get_db)):
         }
         for j in jobs
     ]
-
-
-class DescargaComprobanteRequest(BaseModel):
-    tipo_doc: Union[str, int] = Field(
-        ..., description="Tipo de documento SUNAT (01, 03, 07, 08, 09)"
-    )
-    serie: Union[str, int] = Field(
-        ..., description="Serie del comprobante, por ejemplo F001"
-    )
-    numero: Union[str, int] = Field(..., description="Numero correlativo del comprobante")
-    ruc_emisor: Union[str, int] = Field(..., description="RUC del emisor (11 digitos)")
-
-
-CAMPOS_COMPROBANTE = ("tipo_doc", "serie", "numero", "ruc_emisor")
 
 
 async def _leer_parametros_comprobante(request: Request) -> Dict[str, Any]:

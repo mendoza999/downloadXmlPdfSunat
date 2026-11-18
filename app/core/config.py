@@ -36,6 +36,8 @@ DESCARGAR_XML = _booleano("DESCARGAR_XML", True)
 OUTPUT_DIR = _ruta_absoluta(os.getenv("OUTPUT_DIR", "./descargas_sunat"))
 UPLOAD_DIR = _ruta_absoluta(os.getenv("UPLOAD_DIR", "./uploads"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))
+# Maximo de comprobantes aceptados en una solicitud JSON por lote
+MAX_COMPROBANTES_POR_LOTE = max(1, int(os.getenv("MAX_COMPROBANTES_POR_LOTE", "500")))
 
 # Parametros de concurrencia y reintentos
 MAX_WORKERS = max(1, int(os.getenv("MAX_WORKERS", "3")))

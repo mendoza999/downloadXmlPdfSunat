@@ -92,6 +92,10 @@ GOOGLE_REDIRECT_URI=http://localhost:8000/auth/google/callback
 DATABASE_URL=postgresql://user:password@host/database
 ```
 
+> El `.env` es la fuente de verdad para las credenciales SUNAT. Si la base de
+> datos conserva un usuario con credenciales antiguas, se registra una
+> advertencia y se usan igualmente las del `.env`.
+
 ## Uso
 
 ### Ejecutar el servidor
@@ -112,6 +116,56 @@ encabezados, se asumen las columnas G, H, I y J.
 curl -X POST "http://localhost:8000/descargar" \
   -F "file=@comprobantes.xlsx"
 ```
+
+### Descargar varios comprobantes desde un JSON (lote)
+
+Para solicitar la descarga sin Excel, envíe un array JSON con los datos de cada
+comprobante. El endpoint crea un trabajo en segundo plano y responde de
+inmediato con `job_id`; el avance se consulta con `GET /estado/{job_id}`.
+
+```bash
+curl -X POST "http://localhost:8000/descargar/lote" \
+  -H "Content-Type: application/json" \
+  -d '[
+        {"tipo_doc": "01", "serie": "F001", "numero": "123", "ruc_emisor": "20123456789"},
+        {"tipo_doc": "03", "serie": "B001", "numero": "45",  "ruc_emisor": "20123456789"}
+      ]'
+```
+
+**Response:**
+```json
+{
+  "job_id": "uuid-del-trabajo",
+  "status": "pending",
+  "total": 2,
+  "duplicados_omitidos": 0
+}
+```
+
+Reglas de la solicitud:
+
+- Cada elemento acepta los mismos formatos que `/descargar/comprobante`
+  (código o nombre del tipo, `numero` y `ruc_emisor` como texto o número).
+- Si un elemento es inválido, se rechaza todo el lote con `400` y el detalle del
+  problema.
+- Los duplicados exactos se omiten y se informan en `duplicados_omitidos`.
+- El máximo por solicitud se configura con `MAX_COMPROBANTES_POR_LOTE`
+  (por defecto `500`); si se supera, responde `422`.
+- El resultado final queda en `GET /estado/{job_id}` (`details` incluye total,
+  PDFs/XMLs descargados y faltantes).
+- La API de SUNAT puede responder `HTTP 500` de forma intermitente; el pipeline
+  reintenta por archivo y por rondas. Por eso el job puede permanecer en
+  `processing` varios minutos antes de completarse.
+- El endpoint detecta si el comprobante es **emitido** (RUC emisor igual al RUC
+  autenticado) o **recibido** (RUC emisor distinto) y consulta el recurso
+  correcto de SUNAT (`-1` o `-2`).
+- Si SUNAT responde `HTTP 422` con `codError 113` (“No hay resultados para la
+  consulta”), el comprobante no pertenece al RUC autenticado: se marca como no
+  encontrado y **no se reintenta**. Verifique que el `.env` tenga el RUC dueño
+  de los comprobantes (emisor o receptor).
+- Si no se descargó ningún archivo, el job termina en `failed`; si se descargó
+  al menos uno, termina en `completed` y los pendientes quedan en
+  `details.faltantes` con el motivo reportado por SUNAT.
 
 ### Descargar un comprobante puntual (PDF y XML)
 
@@ -316,6 +370,7 @@ respetan automaticamente el prefijo configurado en `ROOT_PATH`.
 | GET | `/` | Informacion basica del servicio |
 | GET | `/health` | Health check |
 | POST | `/descargar` | Sube un Excel e inicia la descarga |
+| POST | `/descargar/lote` | Recibe un array JSON y encola la descarga de varios comprobantes |
 | POST | `/descargar/comprobante` | Descarga puntual (sincrona) de PDF/XML de un comprobante |
 | GET | `/comprobante/archivo` | Entrega un PDF, XML o ZIP ya descargado |
 | GET | `/estado/{job_id}` | Consulta el estado de un trabajo |

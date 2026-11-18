@@ -87,6 +87,9 @@ def obtener_token_automatico(ruc: str, usuario: str, clave: str) -> str:
             _esperar_resultado_login(app_page, timeout)
             logger.info("Login exitoso.")
 
+            # El menú se renderiza por AJAX después de la redirección; hay que
+            # esperar a que exista antes de cerrar modales o hacer clics.
+            _esperar_menu(app_page, timeout)
             _cerrar_modales(app_page)
 
             # Navegación si todavía no se capturó el token
@@ -171,10 +174,18 @@ RUTA_MENU_CONSULTA = (
 def _click_menu(app_page, selector: str, timeout_ms: int) -> None:
     """Hace clic en una opción del menú SOL esperando a que esté visible."""
     locator = app_page.locator(selector).first
-    if not locator.count():
-        raise SunatAuthError(f"No se encontró la opción del menú {selector}.")
+    try:
+        locator.wait_for(state="attached", timeout=timeout_ms)
+    except Exception:
+        if not locator.count():
+            raise SunatAuthError(f"No se encontró la opción del menú {selector}.")
     locator.wait_for(state="visible", timeout=timeout_ms)
-    locator.click()
+    try:
+        locator.click(timeout=min(timeout_ms, 15000))
+    except Exception:
+        # Un modal (por ejemplo la campaña de datos) puede interceptar el clic.
+        _cerrar_modales(app_page)
+        locator.click(timeout=min(timeout_ms, 15000))
     # El menú carga los subniveles por AJAX; damos tiempo a que aparezcan
     app_page.wait_for_timeout(1200)
 
@@ -261,30 +272,76 @@ def _en_menu_principal(url: str) -> bool:
     )
 
 
-def _cerrar_modales(app_page):
-    """Cierra los modales informativos que bloquean la navegación."""
+def _esperar_menu(app_page, timeout_ms: int) -> None:
+    """Espera a que el menú SOL termine de cargar sus opciones por AJAX."""
     try:
-        campana = app_page.locator("#divModalCampana")
-        campana.wait_for(state="visible", timeout=5000)
-        ifr_vce = app_page.frame_locator("iframe[name='ifrVCE']")
-        for selector in [
-            "#modalInformativoValidacionDatos #btnFinalizarValidacionDatos",
-            "#modalInformativoSecundario #btnFinalizarValidacionDatos",
-        ]:
-            btn = ifr_vce.locator(selector)
-            try:
-                btn.wait_for(state="visible", timeout=3000)
-                btn.dispatch_event("click")
-                app_page.wait_for_timeout(1000)
-            except Exception:
-                continue
-        try:
-            campana.wait_for(state="hidden", timeout=5000)
-        except Exception:
-            pass
-        logger.info("Modales cerrados.")
+        app_page.wait_for_selector("#nivel1_11", state="attached", timeout=timeout_ms)
+    except Exception as exc:
+        logger.warning("El menú SOL no cargó completamente: %s", exc)
+        return
+    try:
+        app_page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        # El menú puede tener sondeos periódicos; no es un error.
+        pass
+
+
+def _cerrar_modales(app_page):
+    """Cierra los modales informativos que bloquean la navegación.
+
+    Algunas cuentas muestran, después del login, una campaña de actualización
+    de datos dentro de ``#divModalCampana`` (iframe ``#ifrVCE``). Ese modal
+    intercepta los clics del menú y debe cerrarse antes de navegar.
+    """
+    campana = app_page.locator("#divModalCampana")
+    if not campana.count():
+        logger.info("Sin modales.")
+        return
+
+    try:
+        campana.first.wait_for(state="visible", timeout=8000)
     except Exception:
         logger.info("Sin modales.")
+        return
+
+    ifr_vce = app_page.frame_locator("iframe#ifrVCE")
+    botones = [
+        "#btnCerrar",  # "Continuar sin confirmar"
+        "#modalInformativoValidacionDatos #btnFinalizarValidacionDatos",
+        "#modalInformativoSecundario #btnFinalizarValidacionDatos",
+        "#btnFinalizarValidacionDatos",
+    ]
+
+    for selector in botones:
+        try:
+            btn = ifr_vce.locator(selector).first
+            btn.wait_for(state="visible", timeout=3000)
+            btn.dispatch_event("click")
+            app_page.wait_for_timeout(1500)
+            if not campana.first.is_visible():
+                logger.info("Modales cerrados con %s.", selector)
+                return
+        except Exception:
+            continue
+
+    # Último recurso: ocultar el modal que bloquea el menú.
+    try:
+        app_page.evaluate(
+            """() => {
+                for (const id of ['divModalCampana', 'divModalCampanaBak']) {
+                    const el = document.getElementById(id);
+                    if (el) {
+                        el.style.display = 'none';
+                        el.classList.remove('in');
+                    }
+                }
+                document.querySelectorAll('.modal-backdrop').forEach((e) => e.remove());
+            }"""
+        )
+        app_page.wait_for_timeout(500)
+        logger.info("Modal de campaña ocultado por JS.")
+    except Exception as exc:
+        logger.warning("No se pudo ocultar el modal de campaña: %s", exc)
 
 
 def _mensaje_error_login(app_page) -> str:
